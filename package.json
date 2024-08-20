@@ -1,0 +1,14 @@
+{
+  "type": "module",
+  "dependencies": {
+    "prosemirror-model": "^1.22.3",
+    "prosemirror-schema-basic": "^1.2.3",
+    "prosemirror-test-builder": "^1.1.1",
+    "prosemirror-transform": "^1.10.0",
+    "typescript": "^5.5.4"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.7",
+    "mocha": "^10.7.3"
+  }
+}
