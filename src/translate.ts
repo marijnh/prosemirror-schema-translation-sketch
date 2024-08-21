@@ -151,7 +151,8 @@ function composeMapping(a: StepMap, b: StepMap) {
 
 export function translateSteps(startDoc: Node, steps: readonly Step[]) {
   let docChanges: Change[] = []
-  let doc = translateDoc(startDoc, docChanges), newSteps: Step[] = []
+  let before = translateDoc(startDoc, docChanges)
+  let doc = before, newSteps: Step[] = []
   let map = createMap(docChanges)
   for (let s of steps) {
     let step = s.map(map), newStep, changes: Change[] = []
@@ -183,5 +184,5 @@ export function translateSteps(startDoc: Node, steps: readonly Step[]) {
     if (result.failed) throw new Error(`Failed to apply translated step: ${result.failed}`)
     doc = result.doc!
   }
-  return {doc, steps: newSteps, map}
+  return {startDoc: before, doc, steps: newSteps, map}
 }

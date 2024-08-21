@@ -1,5 +1,7 @@
-import {newSchema, oldSchema, translateDoc} from "../src/translate.js"
+import {newSchema, oldSchema, translateDoc, translateSteps} from "../src/translate.js"
 import {builders} from "prosemirror-test-builder"
+import {Transform} from "prosemirror-transform"
+import {Node} from "prosemirror-model"
 
 let o = builders(oldSchema, {p: {nodeType: "paragraph"}, hr: {nodeType: "horizontal_rule"}})
 let n = builders(newSchema, {p: {nodeType: "paragraph"}})
@@ -27,5 +29,19 @@ describe("translateDoc", () => {
   it("creates replacement nodes when needed", () => {
     eq(translateDoc(o.doc(o.hr())),
        n.doc(n.p()))
+  })
+})
+
+describe("translateSteps", () => {
+  function steps(tr: Transform, expect: Node) {
+    let {doc} = translateSteps(tr.before, tr.steps)
+    eq(doc, expect)
+  }
+
+  it("translates mark steps", () => {
+    steps(new Transform(o.doc(o.p(o.strong("One two"))))
+      .addMark(5, 8, oldSchema.mark("em"))
+      .removeMark(1, 5, oldSchema.mark("strong")),
+          n.doc(n.p("One ", n.strong(n.em("two")))))
   })
 })
