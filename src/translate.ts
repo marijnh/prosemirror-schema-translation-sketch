@@ -22,17 +22,22 @@ export class SchemaTranslation {
 
 type Change = {from: number, to: number, insert: number}
 
-// FIXME handle replace-around injected content
 function translateFragment(fragment: Fragment, parentType: NodeType,
                            openStart: readonly ContentMatch[], openEnd: readonly Fragment[],
                            changes: Change[], pos: number, tr: SchemaTranslation,
                            inject: null | {at: number, content: Fragment}): Fragment {
   let children = [], match = openStart.length ? openStart[0] : parentType.contentMatch
   for (let i = 0;; i++) {
-    if (inject && inject.at == pos) pos += inject.content.size
+    if (inject && inject.at == pos) {
+      pos += inject.content.size
+      match = match.matchFragment(inject.content) || match
+    }
     if (i == fragment.childCount) break
     let child = fragment.child(i)
-    if (inject && child.isText && inject.at > pos && inject.at < pos + child.nodeSize) pos += inject.content.size
+    if (inject && child.isText && inject.at > pos && inject.at < pos + child.nodeSize) {
+      pos += inject.content.size
+      match = match.matchFragment(inject.content) || match
+    }
     let mapped = tr.mapping[child.type.name]
     if (mapped == false) {
       changes.push({from: pos, to: pos + child.nodeSize, insert: 0})
