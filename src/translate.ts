@@ -10,6 +10,11 @@ const newSchema = new Schema({
   marks: oldSchema.spec.marks
 })
 
+const mapping: {[nodeName: string]: string | false} = {
+  "image": "picture",
+  "horizontal_rule": false
+}
+
 export {oldSchema, newSchema}
 
 type Change = {from: number, to: number, insert: number}
@@ -21,17 +26,22 @@ function translateMark(mark: Mark) {
 // FIXME handle replace-around injected content
 function translateFragment(fragment: Fragment, parentType: NodeType,
                            openStart: readonly ContentMatch[], openEnd: readonly Fragment[],
-                           changes: Change[], pos: number): Fragment {
+                           changes: Change[], pos: number,
+                           inject: null | {at: number, content: Fragment}): Fragment {
   let children = [], match = openStart.length ? openStart[0] : parentType.contentMatch
-  for (let i = 0; i < fragment.childCount; i++) {
+  for (let i = 0;; i++) {
+    if (inject && inject.at == pos) pos += inject.content.size
+    if (i == fragment.childCount) break
     let child = fragment.child(i)
-    if (child.type.name == "horizontal_rule") {
+    if (inject && child.isText && inject.at > pos && inject.at < pos + child.nodeSize) pos += inject.content.size
+    let mapped = mapping[child.type.name]
+    if (mapped == false) {
       changes.push({from: pos, to: pos + child.nodeSize, insert: 0})
     } else {
-      let type = newSchema.nodes[child.type.name == "image" ? "picture" : child.type.name]
+      let type = newSchema.nodes[mapped || child.type.name]
       let content = translateFragment(child.content, type, i ? [] : openStart.slice(1),
                                       i < fragment.childCount - 1 ? [] : openEnd.slice(1),
-                                      changes, pos + 1)
+                                      changes, pos + 1, inject)
       let marks = child.marks.map(translateMark)
       let newChild = type.isText ? type.schema.text(child.text!, marks) : type.create(child.attrs, content, marks)
       let fit = match.matchType(type)
@@ -61,23 +71,24 @@ function translateFragment(fragment: Fragment, parentType: NodeType,
   return Fragment.from(children)
 }
 
-export function translateSlice(slice: Slice, doc: Node, from: number, to: number, changes: Change[]): Slice {
+export function translateSlice(slice: Slice, doc: Node, from: number, to: number, changes: Change[],
+                               inject: null | {at: number, content: Fragment}): Slice {
   let $from = doc.resolve(from), $to = doc.resolve(to)
   let openStart: ContentMatch[] = [], openEnd: Fragment[] = []
-  for (let i = 0; i < slice.openStart; i++) {
-    let node = $from.node(-i), index = $from.indexAfter(-i)
+  for (let i = slice.openStart; i >= 0; i--) {
+    let d = $from.depth - i, node = $from.node(d), index = $from.indexAfter(d)
     openStart.push(node.contentMatchAt(index))
   }
-  for (let i = 0; i < slice.openEnd; i++) {
-    let node = $to.node(-i), index = $to.index(-i)
-    openEnd.push(node.content.cut($to.posAtIndex(index, -i)))
+  for (let i = slice.openEnd; i >= 0; i--) {
+    let d = $to.depth - i, node = $to.node(d), index = $to.index(d)
+    openEnd.push(node.content.cut($to.posAtIndex(index, d)))
   }
-  return new Slice(translateFragment(slice.content, $from.node().type, openStart, openEnd, changes, $from.pos),
+  return new Slice(translateFragment(slice.content, $from.node().type, openStart, openEnd, changes, $from.pos, inject),
                    slice.openStart, slice.openEnd)
 }
 
 export function translateDoc(doc: Node, changes?: Change[]) {
-  return newSchema.nodes.doc.create(null, translateFragment(doc.content, newSchema.nodes.doc, [], [], changes || [], 0))
+  return newSchema.nodes.doc.create(null, translateFragment(doc.content, newSchema.nodes.doc, [], [], changes || [], 0, null))
 }
 
 function addRange(ranges: number[], pos: number, del: number, ins: number) {
@@ -106,45 +117,76 @@ function transformMapping(map: StepMap, over: StepMap) {
   return new StepMap(ranges)
 }
 
-function composeMapping(a: StepMap, b: StepMap) {
-  let rA: number[] = (a as any).ranges, iA = 0
-  let posA = -1, delA = -1, insA = -1
-  function nextA() { posA = rA[iA++]; delA = rA[iA++]; insA = rA[iA++] }
-  if (rA.length) nextA()
-  let rB: number[] = (b as any).ranges, iB = 0
-  let posB = -1, delB = -1, insB = -1
-  function nextB() { posB = rB[iB++]; delB = rB[iB++]; insB = rB[iB++] }
-  if (rB.length) nextB()
+class MapIter {
+  ranges: number[]
+  i = 0
+  pos = 0
+  len: number
+  ins = -1
+  off = false
 
-  let ranges: number[] = []
-  for (let posBefore = 0, posMid = 0;;) {
-    if (posA < 0 && posB < 0) {
-      return new StepMap(ranges)
-    } else if (posA == posBefore) {
-      let len = delA
-      if (posB > -1) len = Math.min(len, posB - posMid)
-      posBefore += len
-      posMid += insA
-      addRange(ranges, posA, len, insA)
-      if (delA == len) {
-        nextA()
-      } else {
-        delA -= len; posA += len; insA = 0
-      }
-    } else if (posB == posMid) {
-      let len = delB
-      if (posA > -1) len = Math.min(len, posA - posBefore)
-      posMid += len
-      addRange(ranges, posBefore, len, insB)
-      if (delB == len) {
-        nextB()
-      } else {
-        delB -= len; posB += len; insB = 0
-      }
+  constructor(map: StepMap) {
+    let ranges = this.ranges = (map as any).ranges
+    if (!ranges.length) {
+      this.len = 1e9
+    } else if (ranges[0] == 0) {
+      this.len = ranges[1]
+      this.ins = ranges[2]
+      this.i = 3
     } else {
-      // Skip unchanged content
-      let dist = Math.min(posA < 0 ? 1e9 : posA - posBefore, posB < 0 ? 1e9 : posB - posMid)
-      posBefore += dist; posMid += dist
+      this.len = ranges[0]
+    }
+  }
+
+  adv(len: number) {
+    this.pos += len
+    if (len < this.len) {
+      this.len -= len
+      this.off = true
+    } else if (this.i == this.ranges.length) {
+      this.len = 1e9
+      this.ins = -1
+    } else if (this.pos == this.ranges[this.i]) {
+      this.len = this.ranges[this.i + 1]
+      this.ins = this.ranges[this.i + 2]
+      this.off = false
+      this.i += 3
+    } else {
+      this.len = this.ranges[this.i] - this.pos
+      this.ins = -1
+    }
+  }
+
+  adv2(len: number) {
+    if (this.ins == -1) this.adv(len)
+    else if (len == this.ins) this.adv(this.len)
+    else { this.ins -= len; this.off = true }
+  }
+}
+
+function composeMapping(a: StepMap, b: StepMap) {
+  let iA = new MapIter(a), iB = new MapIter(b)
+  let ranges: number[] = []
+  for (;;) {
+    if (iA.i == iA.ranges.length && iA.ins < 0 && iB.i == iB.ranges.length && iB.ins < 0) {
+      return new StepMap(ranges)
+    } else if (iA.ins == 0) {
+      addRange(ranges, iA.pos, iA.len, 0)
+      iA.adv(iA.len)
+    } else if (iB.len == 0) {
+      addRange(ranges, iA.pos, 0, iB.ins)
+      iB.adv(0)
+    } else {
+      let len = Math.min(iA.ins < 0 ? iA.len : iA.ins, iB.len)
+      if (iA.ins == -1) {
+        if (iB.ins > -1) addRange(ranges, iA.pos, len, iB.off ? 0 : iB.ins)
+      } else if (iB.ins == -1) {
+        addRange(ranges, iA.pos, iA.off ? 0 : iA.len, len)
+      } else {
+        addRange(ranges, iA.pos, iA.off ? 0 : iA.len, iB.off ? 0 : iB.ins)
+      }
+      iA.adv2(len)
+      iB.adv(len)
     }
   }  
 }
@@ -166,9 +208,13 @@ export function translateSteps(startDoc: Node, steps: readonly Step[]) {
     } else if (step instanceof RemoveNodeMarkStep) {
       newStep = new RemoveNodeMarkStep(step.pos, translateMark(step.mark))
     } else if (step instanceof ReplaceStep) {
-      newStep = new ReplaceStep(step.from, step.to, translateSlice(step.slice, doc, step.from, step.to, changes))
+      newStep = new ReplaceStep(step.from, step.to, translateSlice(step.slice, doc, step.from, step.to, changes, null))
     } else if (step instanceof ReplaceAroundStep) {
-      throw new Error("FIXME")
+      let injectPos = step.gapFrom + step.insert
+      let inject = {at: injectPos, content: doc.slice(step.gapFrom, step.gapTo).content}
+      let slice = translateSlice(step.slice, doc, step.from, step.to, changes, inject)
+      for (let ch of changes) if (ch.from < injectPos) injectPos += ch.insert - (ch.to - ch.from)
+      newStep = new ReplaceAroundStep(step.from, step.to, step.gapFrom, step.gapTo, slice, injectPos - step.gapFrom)
     } else if (step instanceof AttrStep) {
       newStep = new AttrStep(step.pos, step.attr, step.value)
     } else if (step instanceof DocAttrStep) {
@@ -176,9 +222,9 @@ export function translateSteps(startDoc: Node, steps: readonly Step[]) {
     } else {
       throw new Error(`Unsupported step type: ${(step as any).jsonID}.`)
     }
-    if (changes.length) map = composeMapping(map, createMap(changes))
     let stepMap = newStep.getMap()
     if (stepMap != StepMap.empty) map = transformMapping(map, stepMap)
+    if (changes.length) map = composeMapping(map, createMap(changes))
     newSteps.push(newStep)
     let result = newStep.apply(doc)
     if (result.failed) throw new Error(`Failed to apply translated step: ${result.failed}`)
