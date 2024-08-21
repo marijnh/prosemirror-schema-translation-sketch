@@ -1,7 +1,20 @@
-import {newSchema, oldSchema, translateDoc, translateSteps} from "../src/translate.js"
+import {SchemaTranslation} from "../src/translate.js"
 import {builders} from "prosemirror-test-builder"
 import {Transform, ReplaceAroundStep} from "prosemirror-transform"
-import {Node, Slice, Fragment} from "prosemirror-model"
+import {Node, Slice, Fragment, Schema} from "prosemirror-model"
+import {schema as oldSchema} from "prosemirror-schema-basic"
+
+const newSchema = new Schema({
+  nodes: oldSchema.spec.nodes.remove("horizontal_rule").remove("image").append({
+    picture: oldSchema.spec.nodes.get("image")!
+  }),
+  marks: oldSchema.spec.marks
+})
+
+const trans = new SchemaTranslation(oldSchema, newSchema, {
+  "image": "picture",
+  "horizontal_rule": false
+})
 
 let o = builders(oldSchema, {p: {nodeType: "paragraph"}, hr: {nodeType: "horizontal_rule"}})
 let n = builders(newSchema, {p: {nodeType: "paragraph"}})
@@ -12,29 +25,29 @@ function eq<T extends {eq(other: T): boolean}>(a: T, b: T) {
 
 describe("translateDoc", () => {
   it("can translate a simple doc", () => {
-    eq(translateDoc(o.doc(o.p("One ", o.strong("two")))),
+    eq(trans.translateDoc(o.doc(o.p("One ", o.strong("two")))),
        n.doc(n.p("One ", n.strong("two"))))
   })
 
   it("renames image nodes", () => {
-    eq(translateDoc(o.doc(o.p(o.image({src: "x.png"})))),
+    eq(trans.translateDoc(o.doc(o.p(o.image({src: "x.png"})))),
        n.doc(n.p(n.picture({src: "x.png"}))))
   })
 
   it("removes horizontal rule nodes", () => {
-    eq(translateDoc(o.doc(o.p("One"), o.hr())),
+    eq(trans.translateDoc(o.doc(o.p("One"), o.hr())),
        n.doc(n.p("One")))
   })
 
   it("creates replacement nodes when needed", () => {
-    eq(translateDoc(o.doc(o.hr())),
+    eq(trans.translateDoc(o.doc(o.hr())),
        n.doc(n.p()))
   })
 })
 
 describe("translateSteps", () => {
   function steps(tr: Transform, expect: Node) {
-    let {doc} = translateSteps(tr.before, tr.steps)
+    let {doc} = trans.translateSteps(tr.before, tr.steps)
     eq(doc, expect)
   }
 

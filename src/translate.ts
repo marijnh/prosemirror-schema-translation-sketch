@@ -1,32 +1,30 @@
-import {schema as oldSchema} from "prosemirror-schema-basic"
 import {Node, NodeType, Fragment, Mark, Schema, Slice, ContentMatch} from "prosemirror-model"
 import {Step, StepMap, ReplaceStep, ReplaceAroundStep, AddMarkStep, RemoveMarkStep,
         AddNodeMarkStep, RemoveNodeMarkStep, AttrStep, DocAttrStep} from "prosemirror-transform"
 
-const newSchema = new Schema({
-  nodes: oldSchema.spec.nodes.remove("horizontal_rule").remove("image").append({
-    picture: oldSchema.spec.nodes.get("image")!
-  }),
-  marks: oldSchema.spec.marks
-})
+export class SchemaTranslation {
+  constructor(readonly oldSchema: Schema, readonly newSchema: Schema,
+              readonly mapping: {[nodeName: string]: string | false}) {}
 
-const mapping: {[nodeName: string]: string | false} = {
-  "image": "picture",
-  "horizontal_rule": false
+  translateMark(mark: Mark) {
+    return this.newSchema.marks[mark.type.name].create(mark.attrs)
+  }
+
+  translateDoc(doc: Node) {
+    return translateDoc(doc, this)
+  }
+
+  translateSteps(startDoc: Node, steps: readonly Step[]) {
+    return translateSteps(startDoc, steps, this)
+  }
 }
-
-export {oldSchema, newSchema}
 
 type Change = {from: number, to: number, insert: number}
-
-function translateMark(mark: Mark) {
-  return newSchema.marks[mark.type.name].create(mark.attrs)
-}
 
 // FIXME handle replace-around injected content
 function translateFragment(fragment: Fragment, parentType: NodeType,
                            openStart: readonly ContentMatch[], openEnd: readonly Fragment[],
-                           changes: Change[], pos: number,
+                           changes: Change[], pos: number, tr: SchemaTranslation,
                            inject: null | {at: number, content: Fragment}): Fragment {
   let children = [], match = openStart.length ? openStart[0] : parentType.contentMatch
   for (let i = 0;; i++) {
@@ -34,15 +32,15 @@ function translateFragment(fragment: Fragment, parentType: NodeType,
     if (i == fragment.childCount) break
     let child = fragment.child(i)
     if (inject && child.isText && inject.at > pos && inject.at < pos + child.nodeSize) pos += inject.content.size
-    let mapped = mapping[child.type.name]
+    let mapped = tr.mapping[child.type.name]
     if (mapped == false) {
       changes.push({from: pos, to: pos + child.nodeSize, insert: 0})
     } else {
-      let type = newSchema.nodes[mapped || child.type.name]
+      let type = tr.newSchema.nodes[mapped || child.type.name]
       let content = translateFragment(child.content, type, i ? [] : openStart.slice(1),
                                       i < fragment.childCount - 1 ? [] : openEnd.slice(1),
-                                      changes, pos + 1, inject)
-      let marks = child.marks.map(translateMark)
+                                      changes, pos + 1, tr, inject)
+      let marks = child.marks.map(m => tr.translateMark(m))
       let newChild = type.isText ? type.schema.text(child.text!, marks) : type.create(child.attrs, content, marks)
       let fit = match.matchType(type)
       if (!fit) {
@@ -72,7 +70,7 @@ function translateFragment(fragment: Fragment, parentType: NodeType,
 }
 
 export function translateSlice(slice: Slice, doc: Node, from: number, to: number, changes: Change[],
-                               inject: null | {at: number, content: Fragment}): Slice {
+                               tr: SchemaTranslation, inject: null | {at: number, content: Fragment}): Slice {
   let $from = doc.resolve(from), $to = doc.resolve(to)
   let openStart: ContentMatch[] = [], openEnd: Fragment[] = []
   for (let i = slice.openStart; i >= 0; i--) {
@@ -83,12 +81,13 @@ export function translateSlice(slice: Slice, doc: Node, from: number, to: number
     let d = $to.depth - i, node = $to.node(d), index = $to.index(d)
     openEnd.push(node.content.cut($to.posAtIndex(index, d)))
   }
-  return new Slice(translateFragment(slice.content, $from.node().type, openStart, openEnd, changes, $from.pos, inject),
+  return new Slice(translateFragment(slice.content, $from.node().type, openStart, openEnd, changes, $from.pos, tr, inject),
                    slice.openStart, slice.openEnd)
 }
 
-export function translateDoc(doc: Node, changes?: Change[]) {
-  return newSchema.nodes.doc.create(null, translateFragment(doc.content, newSchema.nodes.doc, [], [], changes || [], 0, null))
+export function translateDoc(doc: Node, tr: SchemaTranslation, changes?: Change[]) {
+  let content = translateFragment(doc.content, tr.newSchema.nodes.doc, [], [], changes || [], 0, tr, null)
+  return tr.newSchema.nodes.doc.create(null, content)
 }
 
 function addRange(ranges: number[], pos: number, del: number, ins: number) {
@@ -191,28 +190,28 @@ function composeMapping(a: StepMap, b: StepMap) {
   }  
 }
 
-export function translateSteps(startDoc: Node, steps: readonly Step[]) {
+export function translateSteps(startDoc: Node, steps: readonly Step[], tr: SchemaTranslation) {
   let docChanges: Change[] = []
-  let before = translateDoc(startDoc, docChanges)
+  let before = translateDoc(startDoc, tr, docChanges)
   let doc = before, newSteps: Step[] = []
   let map = createMap(docChanges)
   for (let s of steps) {
     let step = s.map(map), newStep, changes: Change[] = []
     if (!step) continue
     if (step instanceof AddMarkStep) {
-      newStep = new AddMarkStep(step.from, step.to, translateMark(step.mark))
+      newStep = new AddMarkStep(step.from, step.to, tr.translateMark(step.mark))
     } else if (step instanceof RemoveMarkStep) {
-      newStep = new RemoveMarkStep(step.from, step.to, translateMark(step.mark))
+      newStep = new RemoveMarkStep(step.from, step.to, tr.translateMark(step.mark))
     } else if (step instanceof AddNodeMarkStep) {
-      newStep = new AddNodeMarkStep(step.pos, translateMark(step.mark))
+      newStep = new AddNodeMarkStep(step.pos, tr.translateMark(step.mark))
     } else if (step instanceof RemoveNodeMarkStep) {
-      newStep = new RemoveNodeMarkStep(step.pos, translateMark(step.mark))
+      newStep = new RemoveNodeMarkStep(step.pos, tr.translateMark(step.mark))
     } else if (step instanceof ReplaceStep) {
-      newStep = new ReplaceStep(step.from, step.to, translateSlice(step.slice, doc, step.from, step.to, changes, null))
+      newStep = new ReplaceStep(step.from, step.to, translateSlice(step.slice, doc, step.from, step.to, changes, tr, null))
     } else if (step instanceof ReplaceAroundStep) {
       let injectPos = step.gapFrom + step.insert
       let inject = {at: injectPos, content: doc.slice(step.gapFrom, step.gapTo).content}
-      let slice = translateSlice(step.slice, doc, step.from, step.to, changes, inject)
+      let slice = translateSlice(step.slice, doc, step.from, step.to, changes, tr, inject)
       for (let ch of changes) if (ch.from < injectPos) injectPos += ch.insert - (ch.to - ch.from)
       newStep = new ReplaceAroundStep(step.from, step.to, step.gapFrom, step.gapTo, slice, injectPos - step.gapFrom)
     } else if (step instanceof AttrStep) {
